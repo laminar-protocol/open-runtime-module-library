@@ -1,13 +1,13 @@
 use crate::{Config, MomentOf, TimestampedValueOf};
 use frame_support::traits::{Get, Time};
-use orml_traits::CombineData;
+use orml_traits::{AggregateResult, CombineData};
 use sp_std::{marker, prelude::*};
 
 /// Sort by value and returns median timestamped value.
 /// Returns prev_value if not enough valid values.
 pub struct DefaultCombineData<T, MinimumCount, ExpiresIn, I = ()>(marker::PhantomData<(T, I, MinimumCount, ExpiresIn)>);
 
-impl<T, I, MinimumCount, ExpiresIn> CombineData<<T as Config<I>>::OracleKey, TimestampedValueOf<T, I>>
+impl<T, I, MinimumCount, ExpiresIn> CombineData<<T as Config<I>>::OracleKey, TimestampedValueOf<T, I>, MomentOf<T, I>>
 	for DefaultCombineData<T, MinimumCount, ExpiresIn, I>
 where
 	T: Config<I>,
@@ -19,7 +19,7 @@ where
 		_key: &<T as Config<I>>::OracleKey,
 		mut values: Vec<TimestampedValueOf<T, I>>,
 		prev_value: Option<TimestampedValueOf<T, I>>,
-	) -> Option<TimestampedValueOf<T, I>> {
+	) -> AggregateResult<TimestampedValueOf<T, I>, MomentOf<T, I>> {
 		let expires_in = ExpiresIn::get();
 		let now = T::Time::now();
 
@@ -28,12 +28,24 @@ where
 		let count = values.len() as u32;
 		let minimum_count = MinimumCount::get();
 		if count < minimum_count || count == 0 {
-			return prev_value;
+			// return the previous value, without a valid_until deadline
+			return match prev_value {
+				Some(value) => AggregateResult::PermanentValue(value),
+				None => AggregateResult::PermanentlyNone,
+			};
 		}
+
+		let valid_until = values
+			.iter()
+			.map(|x| x.timestamp)
+			.min()
+			.map(|timestamp| timestamp + expires_in)
+			.unwrap(); // Won't panic as `values` ensured not empty.
 
 		let mid_index = count / 2;
 		// Won't panic as `values` ensured not empty.
 		let (_, value, _) = values.select_nth_unstable_by(mid_index as usize, |a, b| a.value.cmp(&b.value));
-		Some(value.clone())
+
+		AggregateResult::TemporaryValue(value.clone(), valid_until)
 	}
 }

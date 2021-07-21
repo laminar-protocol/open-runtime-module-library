@@ -42,13 +42,36 @@ pub trait OnNewData<AccountId, Key, Value> {
 }
 
 /// Combine data provided by operators
-pub trait CombineData<Key, TimestampedValue> {
-	/// Combine data provided by operators
+pub trait CombineData<Key, TimestampedValue, ExpiresAt> {
+	/// Combine data provided by operators. Optionally includes an expiration
+	/// timestamp in the return value
 	fn combine_data(
 		key: &Key,
 		values: Vec<TimestampedValue>,
 		prev_value: Option<TimestampedValue>,
-	) -> Option<TimestampedValue>;
+	) -> AggregateResult<TimestampedValue, ExpiresAt>;
+}
+
+pub enum AggregateResult<TimestampedValue, ExpiresAt> {
+	/// get() will return None forever (unless a new value is fed)
+	PermanentlyNone,
+	/// get() will return None until the given expiration time, after which
+	/// the aggregate is reevaluated
+	TemporarilyNone(ExpiresAt),
+	/// get() will return the given value forever (unless a new value is fed)
+	PermanentValue(TimestampedValue),
+	/// get() will return the given value until the given expiration time, after
+	/// which the aggregate is reevaluated
+	TemporaryValue(TimestampedValue, ExpiresAt),
+}
+
+impl<TimestampedValue, ExpiresAt> AggregateResult<TimestampedValue, ExpiresAt> {
+	pub fn get_value(self) -> Option<TimestampedValue> {
+		match self {
+			AggregateResult::PermanentValue(value) | AggregateResult::TemporaryValue(value, _) => Some(value),
+			_ => None,
+		}
+	}
 }
 
 /// Indicate if should change a value

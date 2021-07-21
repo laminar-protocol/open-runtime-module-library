@@ -32,7 +32,7 @@ use frame_support::{
 	Parameter,
 };
 use frame_system::{ensure_root, ensure_signed, pallet_prelude::*};
-pub use orml_traits::{CombineData, DataFeeder, DataProvider, DataProviderExtended, OnNewData};
+pub use orml_traits::{AggregateResult, CombineData, DataFeeder, DataProvider, DataProviderExtended, OnNewData};
 use orml_utilities::OrderedSet;
 use sp_runtime::{traits::Member, DispatchResult, RuntimeDebug};
 use sp_std::{prelude::*, vec};
@@ -70,7 +70,7 @@ pub mod module {
 
 		/// Provide the implementation to combine raw values to produce
 		/// aggregated value
-		type CombineData: CombineData<Self::OracleKey, TimestampedValueOf<Self, I>>;
+		type CombineData: CombineData<Self::OracleKey, TimestampedValueOf<Self, I>, MomentOf<Self, I>>;
 
 		/// Time provider
 		type Time: Time;
@@ -120,6 +120,12 @@ pub mod module {
 	#[pallet::getter(fn is_updated)]
 	pub type IsUpdated<T: Config<I>, I: 'static = ()> =
 		StorageMap<_, Twox64Concat, <T as Config<I>>::OracleKey, bool, ValueQuery>;
+
+	/// Time until which the combined value with the given key is valid
+	#[pallet::storage]
+	#[pallet::getter(fn expiration_time)]
+	pub type ExpirationTime<T: Config<I>, I: 'static = ()> =
+		StorageMap<_, Twox64Concat, <T as Config<I>>::OracleKey, MomentOf<T, I>>;
 
 	/// Combined value, may not be up to date
 	#[pallet::storage]
@@ -180,13 +186,28 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 	///
 	/// Note this will update values storage if has update.
 	pub fn get(key: &T::OracleKey) -> Option<TimestampedValueOf<T, I>> {
-		if Self::is_updated(key) {
+		if Self::is_updated(key) && !Self::is_expired(key) {
 			<Values<T, I>>::get(key)
 		} else {
-			let timestamped = Self::combined(key)?;
-			<Values<T, I>>::insert(key, timestamped.clone());
+			let aggregate = Self::combined(key);
+
+			// store the expiration time
+			match aggregate {
+				AggregateResult::TemporarilyNone(ref expiration)
+				| AggregateResult::TemporaryValue(_, ref expiration) => <ExpirationTime<T, I>>::insert(key, expiration),
+				_ => <ExpirationTime<T, I>>::remove(key),
+			}
+
+			// store the value
+			let timestamped = aggregate.get_value();
+			match timestamped {
+				Some(ref value) => <Values<T, I>>::insert(key, value),
+				_ => <Values<T, I>>::remove(key),
+			};
+
 			IsUpdated::<T, I>::insert(key, true);
-			Some(timestamped)
+
+			timestamped
 		}
 	}
 
@@ -198,7 +219,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		if Self::is_updated(key) {
 			Self::values(key)
 		} else {
-			Self::combined(key)
+			Self::combined(key).get_value()
 		}
 	}
 
@@ -213,7 +234,7 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 			.collect()
 	}
 
-	fn combined(key: &T::OracleKey) -> Option<TimestampedValueOf<T, I>> {
+	fn combined(key: &T::OracleKey) -> AggregateResult<TimestampedValueOf<T, I>, MomentOf<T, I>> {
 		let values = Self::read_raw_values(key);
 		T::CombineData::combine_data(key, values, Self::values(key))
 	}
@@ -244,6 +265,12 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		}
 		Self::deposit_event(Event::NewFeedData(who, values));
 		Ok(())
+	}
+
+	fn is_expired(key: &T::OracleKey) -> bool {
+		let expiration = Self::expiration_time(key);
+		let current = T::Time::now();
+		matches!(expiration, Some(t) if current > t)
 	}
 }
 
